@@ -11,8 +11,9 @@ CXXFLAGS = -Xcompiler=-fopenmp
 NVFLAG = -arch=sm_86
 
 # 4. 链接库（⭐重点：加上 MKL）
-LIBS = -lcublas -lcusparse -lcusparseLt -lcudart \
-       -lmkl_rt -lpthread -lm -ldl
+LIBS = -lcublas -lcusparse -lcudart \
+       -l:libcusparseLt.so.0 -l:libmkl_rt.so.2 \
+       -lpthread -lm -ldl
 
 # 5. 最终链接
 test: test.o miscalleneous.o gemm_cublas.o spmm_cusparse.o our_spmm.o file_input.o
