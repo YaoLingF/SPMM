@@ -78,6 +78,12 @@ int main(int argc, char **argv)
 
     try
     {
+        int device = 0;
+        cudaDeviceProp prop;
+        CHECK_CUDA(cudaGetDevice(&device));
+        CHECK_CUDA(cudaGetDeviceProperties(&prop, device));
+        printf("gpu: %s sm_%d%d\n", prop.name, prop.major, prop.minor);
+
         CSR *A = load_mtx_to_csr(argv[1]);
         printf("matrix: M=%d K=%d nnz=%d N=%d iter=%d\n", A->nRow, A->nCol, A->nnz, N, n_iter);
 

@@ -1,13 +1,23 @@
-# src2: CSR-only Our SpMM Core
+# src2: CSR-only Hybrid SpMM Core
 
-This folder keeps only the custom Tensor Core SpMM path from `src/our_spmm.cu`.
-It removes file parsing, dense GEMM validation, cuSPARSE comparison, cuBLAS,
-cuSPARSELt, MKL, and argument parsing.
+This folder keeps the custom SpMM path from `src/our_spmm.cu` and adds an
+HR-SpMM-style hybrid split:
+
+- rows or row segments with full 64-nnz chunks are computed by the Tensor Core path;
+- rows with fewer than 64 nnz, plus the residue of long rows, are computed by a CUDA Core path;
+- long-row residue results are accumulated with the Tensor Core output.
+- preprocessing builds explicit `LongTask(row, nnz_start)` and
+  `ResidueTask(row, nnz_start, nnz_len)` lists, so kernels dispatch fixed work
+  items directly instead of inferring row partitions inside the kernel.
+
+It removes the original dense GEMM validation path, cuBLAS, cuSPARSELt, MKL,
+and argument parsing. A small MatrixMarket loader and cuSPARSE benchmark are
+kept for validation.
 
 ## Files
 
 - `core_spmm.cuh`: minimal CUDA helpers, the host-side `CSR` struct, and the public API.
-- `our_spmm.cu`: workload manager, CUDA kernels, and `our_spmm_balanced`.
+- `our_spmm.cu`: task-list preprocessing, Tensor Core kernel, CUDA Core residue kernel, and `our_spmm_balanced`.
 - `mtx_to_csr.cu/.cuh`: MatrixMarket `.mtx` coordinate input to host-side CSR.
 - `cusparse_baseline.cu/.cuh`: cuSPARSE CSR SpMM baseline with the same host-side inputs.
 - `bench_mtx.cu`: loads `.mtx`, runs cuSPARSE and `our_spmm_balanced`, compares results.
@@ -41,11 +51,22 @@ cd src2
 make
 ```
 
-Override the GPU target if needed:
+By default the Makefile builds a fat binary for `sm_80`, `sm_86`, and `sm_89`,
+plus `compute_89` PTX. Override `GENCODE` only if you want a smaller binary, for
+example:
 
 ```bash
-make ARCH=sm_80
+make GENCODE="-gencode arch=compute_89,code=sm_89"
 ```
+
+If Tensor Core kernels fail with `an illegal instruction was encountered`, run:
+
+```bash
+nvidia-smi --query-gpu=name,compute_cap --format=csv
+cuobjdump --list-elf ./bench_mtx
+```
+
+Then rebuild with a `GENCODE` entry matching the printed compute capability.
 
 ## MatrixMarket Benchmark
 

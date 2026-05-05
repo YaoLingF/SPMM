@@ -1,6 +1,9 @@
 NVCC ?= nvcc
-ARCH ?= sm_86
-NVFLAGS ?= -O3 -arch=$(ARCH)
+GENCODE ?= -gencode arch=compute_80,code=sm_80 \
+           -gencode arch=compute_86,code=sm_86 \
+           -gencode arch=compute_89,code=sm_89 \
+           -gencode arch=compute_89,code=compute_89
+NVFLAGS ?= -O3 $(GENCODE)
 
 TARGET = libour_spmm.a
 BENCH = bench_mtx
