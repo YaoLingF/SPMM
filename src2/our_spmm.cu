@@ -317,24 +317,19 @@ void our_spmm_balanced(CSR *A_csr, half *B, float *C, int N, int n_iter, double 
         CHECK_CUDA(cudaMemcpy(d_residue_tasks, residue_tasks.data(), sizeof(ResidueTask) * residue_tasks.size(), cudaMemcpyHostToDevice));
     }
 
-    const char *disable_tensor_env = getenv("OUR_SPMM_DISABLE_TENSOR");
-    const char *disable_residue_env = getenv("OUR_SPMM_DISABLE_RESIDUE");
-    bool run_tensor = (disable_tensor_env == NULL || disable_tensor_env[0] == '0');
-    bool run_residue = (disable_residue_env == NULL || disable_residue_env[0] == '0');
-
     dim3 tensor_grid((unsigned int)long_tasks.size(), (N + tile_size - 1) / tile_size);
     dim3 cuda_residue_grid((unsigned int)residue_tasks.size(), (N + tile_size - 1) / tile_size);
     const int cuda_residue_block = 128;
     for (int i = 0; i < 5; i++)
     {
         CHECK_CUDA(cudaMemset(dC, 0, sizeof(float) * M * N));
-        if (run_tensor && !long_tasks.empty())
+        if (!long_tasks.empty())
         {
             kernel_tensor_long_tasks<<<tensor_grid, blockdim, tensor_shm_size>>>(d_long_tasks, (int)long_tasks.size(), dA_val, dcol_idx, dB, dC, M, N, K);
             CHECK_CUDA(cudaGetLastError());
             CHECK_CUDA(cudaDeviceSynchronize());
         }
-        if (run_residue && !residue_tasks.empty())
+        if (!residue_tasks.empty())
         {
             kernel_cuda_residue_spmm<<<cuda_residue_grid, cuda_residue_block>>>(d_residue_tasks, (int)residue_tasks.size(), dA_val, drow_offset, dcol_idx, dB, dC, M, N, K);
             CHECK_CUDA(cudaGetLastError());
@@ -347,12 +342,12 @@ void our_spmm_balanced(CSR *A_csr, half *B, float *C, int N, int n_iter, double 
         float iter_time = 0.0f;
         CHECK_CUDA(cudaMemset(dC, 0, sizeof(float) * M * N));
         CHECK_CUDA(cudaEventRecord(start));
-        if (run_tensor && !long_tasks.empty())
+        if (!long_tasks.empty())
         {
             kernel_tensor_long_tasks<<<tensor_grid, blockdim, tensor_shm_size>>>(d_long_tasks, (int)long_tasks.size(), dA_val, dcol_idx, dB, dC, M, N, K);
             CHECK_CUDA(cudaGetLastError());
         }
-        if (run_residue && !residue_tasks.empty())
+        if (!residue_tasks.empty())
         {
             kernel_cuda_residue_spmm<<<cuda_residue_grid, cuda_residue_block>>>(d_residue_tasks, (int)residue_tasks.size(), dA_val, drow_offset, dcol_idx, dB, dC, M, N, K);
             CHECK_CUDA(cudaGetLastError());
