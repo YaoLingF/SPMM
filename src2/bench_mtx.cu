@@ -65,9 +65,9 @@ int main(int argc, char **argv)
 
     int N = argc > 2 ? std::stoi(argv[2]) : 256;
     int n_iter = argc > 3 ? std::stoi(argv[3]) : 10;
-    if (N <= 0 || N % 64 != 0)
+    if (N <= 0)
     {
-        fprintf(stderr, "N must be a positive multiple of 64 for this kernel\n");
+        fprintf(stderr, "N must be positive\n");
         return 1;
     }
     if (n_iter <= 0)

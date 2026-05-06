@@ -116,16 +116,32 @@ static __global__ void
 
     int global_fetch_x = segment_start + local_fetch.x;
     int global_fetch_y = segment_start + local_fetch.y;
-    if (col_start + fetching_col_lane < N)
+    int b_col = col_start + fetching_col_lane;
+    Aval_tmp.x = spmat_val[global_fetch_x];
+    Aval_tmp.y = spmat_val[global_fetch_y];
+    if ((N % 8 == 0) && b_col + 7 < N)
     {
-        int b_offset_x = col_idx[global_fetch_x] * N + col_start + fetching_col_lane;
-        int b_offset_y = col_idx[global_fetch_y] * N + col_start + fetching_col_lane;
-        Aval_tmp.x = spmat_val[global_fetch_x];
-        Aval_tmp.y = spmat_val[global_fetch_y];
-        if (b_offset_x < K * N)
-            fetch_buffer1 = reinterpret_cast<uint4 *>(&B[b_offset_x])[0];
-        if (b_offset_y < K * N)
-            fetch_buffer2 = reinterpret_cast<uint4 *>(&B[b_offset_y])[0];
+        int b_offset_x = col_idx[global_fetch_x] * N + b_col;
+        int b_offset_y = col_idx[global_fetch_y] * N + b_col;
+        fetch_buffer1 = reinterpret_cast<const uint4 *>(&B[b_offset_x])[0];
+        fetch_buffer2 = reinterpret_cast<const uint4 *>(&B[b_offset_y])[0];
+    }
+    else
+    {
+        half *fb1 = reinterpret_cast<half *>(&fetch_buffer1);
+        half *fb2 = reinterpret_cast<half *>(&fetch_buffer2);
+        int b_row_x = col_idx[global_fetch_x];
+        int b_row_y = col_idx[global_fetch_y];
+#pragma unroll
+        for (int t = 0; t < 8; t++)
+        {
+            int col = b_col + t;
+            if (col < N)
+            {
+                fb1[t] = B[b_row_x * N + col];
+                fb2[t] = B[b_row_y * N + col];
+            }
+        }
     }
 
     __syncthreads();
