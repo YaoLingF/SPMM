@@ -1,0 +1,13 @@
+dataset,workload,message_passing_pct_raw_compute
+ogbn_arxiv,cluster_gcn,21.42660138417511
+ogbn_arxiv,neighbor_graphsage,23.61189254022575
+ogbn_products,cluster_gcn,51.67779742838874
+ogbn_products,neighbor_graphsage,21.4657783084723
+flickr,cluster_gcn,15.782921919874346
+flickr,neighbor_graphsage,31.487527326302807
+yelp,cluster_gcn,26.03202050893991
+yelp,neighbor_graphsage,21.97615617052167
+amazon_products,cluster_gcn,35.50378244324611
+amazon_products,neighbor_graphsage,18.66222882222742
+reddit,cluster_gcn,47.942601787254965
+reddit,neighbor_graphsage,28.83712561158044
