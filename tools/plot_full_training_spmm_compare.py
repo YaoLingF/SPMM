@@ -35,12 +35,12 @@ WORKLOADS = [
 
 DEFAULT_COLOR = "#4C78A8"
 OUR_COLOR = "#F58518"
+SPEEDUP_COLOR = "#54A24B"
+SLOWDOWN_COLOR = "#E45756"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Plot full-training wall/CUDA time comparisons"
-    )
+    parser = argparse.ArgumentParser(description="Plot full-training speedup figures")
     parser.add_argument(
         "--summary-csv",
         default="results/full_training_spmm_compare/full_training_spmm_compare_summary.csv",
@@ -59,7 +59,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--linear",
         action="store_true",
-        help="use a linear y-axis instead of the default log scale",
+        help="deprecated; speedup plots are always linear",
+    )
+    parser.add_argument(
+        "--plot-times",
+        action="store_true",
+        help="also draw PyG default vs Our SpMM time bar charts",
+    )
+    parser.add_argument(
+        "--time-log-scale",
+        action="store_true",
+        help="use log y-axis for optional time bar charts",
     )
     parser.add_argument(
         "--no-annotate",
@@ -150,6 +160,97 @@ def annotate_speedups(
         )
 
 
+def annotate_bar_values(ax: plt.Axes, bars, values: list[float]) -> None:
+    ymin, ymax = ax.get_ylim()
+    offset = 0.018 * (ymax - ymin)
+    for bar, value in zip(bars, values):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            value + offset,
+            f"{value:.2f}x",
+            ha="center",
+            va="bottom",
+            fontsize=7,
+            clip_on=False,
+        )
+
+
+def plot_speedup(
+    df: pd.DataFrame,
+    output_dir: Path,
+    stem: str,
+    speedup_col: str,
+    ylabel: str,
+    dpi: int,
+    annotate: bool,
+) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(7.2, 2.75), sharey=True)
+
+    values_all = df[speedup_col].astype(float).tolist()
+    ymin = min(values_all + [1.0])
+    ymax = max(values_all + [1.0])
+    pad = max(0.05, 0.14 * (ymax - ymin))
+    ylo = max(0.0, ymin - pad)
+    yhi = ymax + pad
+
+    legend_handles = []
+    legend_labels = []
+    for ax, (workload, title) in zip(axes, WORKLOADS):
+        part = df[df["workload"] == workload].sort_values(["dataset_order", "dataset"])
+        if part.empty:
+            ax.set_visible(False)
+            continue
+
+        labels = dataset_labels(part)
+        values = part[speedup_col].astype(float).tolist()
+        x = list(range(len(labels)))
+        colors = [SPEEDUP_COLOR if value >= 1.0 else SLOWDOWN_COLOR for value in values]
+        bars = ax.bar(
+            x,
+            values,
+            width=0.58,
+            color=colors,
+            edgecolor="black",
+            linewidth=0.35,
+        )
+        if not legend_handles:
+            legend_handles = [
+                plt.Rectangle((0, 0), 1, 1, color=SPEEDUP_COLOR, ec="black", lw=0.35),
+                plt.Rectangle((0, 0), 1, 1, color=SLOWDOWN_COLOR, ec="black", lw=0.35),
+            ]
+            legend_labels = ["Our faster", "Our slower"]
+
+        if annotate:
+            annotate_bar_values(ax, bars, values)
+
+        ax.axhline(1.0, color="black", linewidth=0.85, linestyle="--", alpha=0.75)
+        ax.set_title(title)
+        ax.set_xticks(x, labels)
+        ax.tick_params(axis="x", rotation=24)
+        for tick in ax.get_xticklabels():
+            tick.set_horizontalalignment("right")
+            tick.set_rotation_mode("anchor")
+        ax.set_ylim(ylo, yhi)
+        ax.grid(axis="y", alpha=0.28)
+        ax.set_axisbelow(True)
+
+    axes[0].set_ylabel(ylabel)
+    fig.legend(
+        legend_handles,
+        legend_labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.04),
+        ncol=2,
+        frameon=False,
+    )
+    fig.tight_layout(w_pad=1.3, rect=(0, 0, 1, 0.91))
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_dir / f"{stem}.pdf", bbox_inches="tight")
+    fig.savefig(output_dir / f"{stem}.png", bbox_inches="tight", dpi=dpi)
+    plt.close(fig)
+
+
 def plot_metric(
     df: pd.DataFrame,
     output_dir: Path,
@@ -234,36 +335,59 @@ def main() -> int:
     configure_matplotlib()
     output_dir = Path(args.output_dir)
     df = load_rows(Path(args.summary_csv), args.epoch)
-    log_scale = not args.linear
     annotate = not args.no_annotate
 
-    plot_metric(
+    plot_speedup(
         df,
         output_dir,
-        stem="full_training_wall_time_compare",
-        default_col="default_wall_ms",
-        our_col="our_wall_ms",
-        ylabel="Wall time (ms)",
+        stem="full_training_wall_speedup",
+        speedup_col="wall_speedup",
+        ylabel="Training speedup over PyG default (x)",
         dpi=args.dpi,
-        log_scale=log_scale,
         annotate=annotate,
     )
-    plot_metric(
+    plot_speedup(
         df,
         output_dir,
-        stem="full_training_cuda_time_compare",
-        default_col="default_cuda_ms",
-        our_col="our_cuda_ms",
-        ylabel="CUDA time (ms)",
+        stem="full_training_cuda_speedup",
+        speedup_col="cuda_speedup",
+        ylabel="CUDA-event speedup over PyG default (x)",
         dpi=args.dpi,
-        log_scale=log_scale,
         annotate=annotate,
     )
 
-    print(output_dir / "full_training_wall_time_compare.pdf")
-    print(output_dir / "full_training_wall_time_compare.png")
-    print(output_dir / "full_training_cuda_time_compare.pdf")
-    print(output_dir / "full_training_cuda_time_compare.png")
+    print(output_dir / "full_training_wall_speedup.pdf")
+    print(output_dir / "full_training_wall_speedup.png")
+    print(output_dir / "full_training_cuda_speedup.pdf")
+    print(output_dir / "full_training_cuda_speedup.png")
+
+    if args.plot_times:
+        plot_metric(
+            df,
+            output_dir,
+            stem="full_training_wall_time_compare",
+            default_col="default_wall_ms",
+            our_col="our_wall_ms",
+            ylabel="Wall time (ms)",
+            dpi=args.dpi,
+            log_scale=args.time_log_scale,
+            annotate=annotate,
+        )
+        plot_metric(
+            df,
+            output_dir,
+            stem="full_training_cuda_time_compare",
+            default_col="default_cuda_ms",
+            our_col="our_cuda_ms",
+            ylabel="CUDA-event elapsed time (ms)",
+            dpi=args.dpi,
+            log_scale=args.time_log_scale,
+            annotate=annotate,
+        )
+        print(output_dir / "full_training_wall_time_compare.pdf")
+        print(output_dir / "full_training_wall_time_compare.png")
+        print(output_dir / "full_training_cuda_time_compare.pdf")
+        print(output_dir / "full_training_cuda_time_compare.png")
     return 0
 
 
