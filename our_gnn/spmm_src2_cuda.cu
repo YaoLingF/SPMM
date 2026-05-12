@@ -26,8 +26,7 @@ kernel_tensor_src2_long_rows(const int *__restrict__ rowptr,
   extern __shared__ uint32_t shmem[];
 
   int target_row = blockIdx.x;
-  int col_start = blockIdx.y * kTileN;
-  if (target_row >= rows || col_start >= feat_dim) {
+  if (target_row >= rows) {
     return;
   }
 
@@ -39,6 +38,21 @@ kernel_tensor_src2_long_rows(const int *__restrict__ rowptr,
     return;
   }
 
+  int tile_count = (feat_dim + kTileN - 1) / kTileN;
+  int full_segments = full_nnz / kTileN;
+  int row_blocks = full_segments < tile_count ? full_segments : tile_count;
+  int group_idx = blockIdx.y;
+  if (group_idx >= row_blocks) {
+    return;
+  }
+
+  int tile_stride = (tile_count + row_blocks - 1) / row_blocks;
+  int tile_start = group_idx * tile_stride;
+  int tile_end = tile_start + tile_stride;
+  if (tile_end > tile_count) {
+    tile_end = tile_count;
+  }
+
   int laneid;
   int warpid = threadIdx.x / warpSize;
   int num_warps = blockDim.x / warpSize;
@@ -48,11 +62,6 @@ kernel_tensor_src2_long_rows(const int *__restrict__ rowptr,
   float *output_buffer =
       reinterpret_cast<float *>(&A_val_scratch[num_warps * 8]);
   half *B_scratch = reinterpret_cast<half *>(&output_buffer[kTileN]);
-
-  for (int i = 4 * threadIdx.x; i < kTileN; i += 4 * blockDim.x) {
-    reinterpret_cast<float4 *>(&output_buffer[i])[0] = float4{0, 0, 0, 0};
-  }
-  __syncthreads();
 
   uint32_t reg_a[2];
   uint32_t reg_b[1];
@@ -71,116 +80,130 @@ kernel_tensor_src2_long_rows(const int *__restrict__ rowptr,
   local_fetch.x = warpid * 8 + 2 * (laneid / 8);
   local_fetch.y = local_fetch.x + 1;
 
-  for (int seg_off = 0; seg_off < full_nnz; seg_off += kTileN) {
-    int segment_start = row_start + seg_off;
-    int global_fetch_x = segment_start + local_fetch.x;
-    int global_fetch_y = segment_start + local_fetch.y;
-    int b_col = col_start + fetching_col_lane;
-
-    half2 Aval_tmp;
-    Aval_tmp.x = spmat_val[global_fetch_x];
-    Aval_tmp.y = spmat_val[global_fetch_y];
-
-    uint4 fetch_buffer1 = uint4{0, 0, 0, 0};
-    uint4 fetch_buffer2 = uint4{0, 0, 0, 0};
-    if ((feat_dim % 8 == 0) && b_col + 7 < feat_dim) {
-      int b_offset_x = col_idx[global_fetch_x] * feat_dim + b_col;
-      int b_offset_y = col_idx[global_fetch_y] * feat_dim + b_col;
-      fetch_buffer1 = reinterpret_cast<const uint4 *>(&x[b_offset_x])[0];
-      fetch_buffer2 = reinterpret_cast<const uint4 *>(&x[b_offset_y])[0];
-    } else {
-      half *fb1 = reinterpret_cast<half *>(&fetch_buffer1);
-      half *fb2 = reinterpret_cast<half *>(&fetch_buffer2);
-      int b_row_x = col_idx[global_fetch_x];
-      int b_row_y = col_idx[global_fetch_y];
-#pragma unroll
-      for (int t = 0; t < 8; t++) {
-        int col = b_col + t;
-        if (col < feat_dim) {
-          fb1[t] = x[b_row_x * feat_dim + col];
-          fb2[t] = x[b_row_y * feat_dim + col];
-        }
-      }
+  for (int tile = tile_start; tile < tile_end; tile++) {
+    int col_start = tile * kTileN;
+    if (col_start >= feat_dim) {
+      continue;
     }
 
-    int transpose_idx = first_transpose_idx;
-#pragma unroll
-    for (int st = 0; st < 8; st++) {
-      half2 tmp;
-      tmp.x = reinterpret_cast<half *>(&fetch_buffer1)[st];
-      tmp.y = reinterpret_cast<half *>(&fetch_buffer2)[st];
-      reinterpret_cast<half2 *>(&B_scratch[transpose_idx])[0] = tmp;
-      transpose_idx += B_scratch_leading_dim;
-    }
-    reinterpret_cast<half2 *>(&A_val_scratch[local_fetch.x])[0] = Aval_tmp;
-
-    reg_a[0] = 0;
-    reg_a[1] = 0;
-    reg_b[0] = 0;
-    __syncthreads();
-
-    b[0] = reinterpret_cast<half2 *>(&A_val_scratch[2 * laneid])[0];
-#pragma unroll
-    for (int idx = 0; idx < 4; idx++) {
-      reinterpret_cast<float4 *>(&reg_c[4 * idx])[0] = float4{0, 0, 0, 0};
-    }
-#pragma unroll
-    for (int idx = 0; idx < 4; idx++) {
-      int offset =
-          B_scratch_leading_dim *
-              (16 * idx + warpid * (16 / num_warps)) +
-          2 * laneid;
-      a[0] = reinterpret_cast<half2 *>(&B_scratch[offset])[0];
-      a[1] = reinterpret_cast<half2 *>(&B_scratch[offset + B_scratch_leading_dim])[0];
-      asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32"
-                   "{ %0, %1, %2, %3},"
-                   "{ %4, %5 },"
-                   "{ %6 },"
-                   "{ %0, %1, %2, %3};\n"
-                   : "+f"(reg_c[4 * idx]), "+f"(reg_c[4 * idx + 1]),
-                     "+f"(reg_c[4 * idx + 2]), "+f"(reg_c[4 * idx + 3])
-                   : "r"(reg_a[0]), "r"(reg_a[1]), "r"(reg_b[0]));
-    }
-
-    float2 val;
-#pragma unroll
-    for (int idx = 0; idx < 4; idx++) {
-      val.x = reg_c[4 * idx + register_choice];
-      val.y = reg_c[4 * idx + register_choice + 2];
-
-      const unsigned full_mask = 0xffffffffu;
-      val.x += __shfl_down_sync(full_mask, val.x, 18);
-      val.y += __shfl_down_sync(full_mask, val.y, 18);
-      val.x += __shfl_down_sync(full_mask, val.x, 9);
-      val.y += __shfl_down_sync(full_mask, val.y, 9);
-      val.x += __shfl_down_sync(full_mask, val.x, 4);
-      val.y += __shfl_down_sync(full_mask, val.y, 4);
-
-      int out_col = col_start + 16 * idx + 2 * warpid;
-      int out_idx = 16 * idx + 2 * warpid;
-      if (laneid == 0 && out_col < feat_dim) {
-        output_buffer[out_idx] += val.x;
-        if (out_col + 1 < feat_dim) {
-          output_buffer[out_idx + 1] += val.y;
-        }
-      }
+    for (int i = 4 * threadIdx.x; i < kTileN; i += 4 * blockDim.x) {
+      reinterpret_cast<float4 *>(&output_buffer[i])[0] = float4{0, 0, 0, 0};
     }
     __syncthreads();
-  }
 
-  float *output_row = &out[target_row * feat_dim + col_start];
-  for (int i = 4 * threadIdx.x; i < kTileN; i += 4 * blockDim.x) {
-    if ((feat_dim % 4 == 0) && col_start + i + 3 < feat_dim) {
-      reinterpret_cast<float4 *>(&output_row[i])[0] =
-          reinterpret_cast<float4 *>(&output_buffer[i])[0];
-    } else {
+    for (int seg_off = 0; seg_off < full_nnz; seg_off += kTileN) {
+      int segment_start = row_start + seg_off;
+      int global_fetch_x = segment_start + local_fetch.x;
+      int global_fetch_y = segment_start + local_fetch.y;
+      int b_col = col_start + fetching_col_lane;
+
+      half2 Aval_tmp;
+      Aval_tmp.x = spmat_val[global_fetch_x];
+      Aval_tmp.y = spmat_val[global_fetch_y];
+
+      uint4 fetch_buffer1 = uint4{0, 0, 0, 0};
+      uint4 fetch_buffer2 = uint4{0, 0, 0, 0};
+      if ((feat_dim % 8 == 0) && b_col + 7 < feat_dim) {
+        int b_offset_x = col_idx[global_fetch_x] * feat_dim + b_col;
+        int b_offset_y = col_idx[global_fetch_y] * feat_dim + b_col;
+        fetch_buffer1 = reinterpret_cast<const uint4 *>(&x[b_offset_x])[0];
+        fetch_buffer2 = reinterpret_cast<const uint4 *>(&x[b_offset_y])[0];
+      } else {
+        half *fb1 = reinterpret_cast<half *>(&fetch_buffer1);
+        half *fb2 = reinterpret_cast<half *>(&fetch_buffer2);
+        int b_row_x = col_idx[global_fetch_x];
+        int b_row_y = col_idx[global_fetch_y];
 #pragma unroll
-      for (int t = 0; t < 4; t++) {
-        if (col_start + i + t < feat_dim) {
-          output_row[i + t] = output_buffer[i + t];
+        for (int t = 0; t < 8; t++) {
+          int col = b_col + t;
+          if (col < feat_dim) {
+            fb1[t] = x[b_row_x * feat_dim + col];
+            fb2[t] = x[b_row_y * feat_dim + col];
+          }
+        }
+      }
+
+      int transpose_idx = first_transpose_idx;
+#pragma unroll
+      for (int st = 0; st < 8; st++) {
+        half2 tmp;
+        tmp.x = reinterpret_cast<half *>(&fetch_buffer1)[st];
+        tmp.y = reinterpret_cast<half *>(&fetch_buffer2)[st];
+        reinterpret_cast<half2 *>(&B_scratch[transpose_idx])[0] = tmp;
+        transpose_idx += B_scratch_leading_dim;
+      }
+      reinterpret_cast<half2 *>(&A_val_scratch[local_fetch.x])[0] = Aval_tmp;
+
+      reg_a[0] = 0;
+      reg_a[1] = 0;
+      reg_b[0] = 0;
+      __syncthreads();
+
+      b[0] = reinterpret_cast<half2 *>(&A_val_scratch[2 * laneid])[0];
+#pragma unroll
+      for (int idx = 0; idx < 4; idx++) {
+        reinterpret_cast<float4 *>(&reg_c[4 * idx])[0] = float4{0, 0, 0, 0};
+      }
+#pragma unroll
+      for (int idx = 0; idx < 4; idx++) {
+        int offset =
+            B_scratch_leading_dim *
+                (16 * idx + warpid * (16 / num_warps)) +
+            2 * laneid;
+        a[0] = reinterpret_cast<half2 *>(&B_scratch[offset])[0];
+        a[1] =
+            reinterpret_cast<half2 *>(&B_scratch[offset + B_scratch_leading_dim])[0];
+        asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32"
+                     "{ %0, %1, %2, %3},"
+                     "{ %4, %5 },"
+                     "{ %6 },"
+                     "{ %0, %1, %2, %3};\n"
+                     : "+f"(reg_c[4 * idx]), "+f"(reg_c[4 * idx + 1]),
+                       "+f"(reg_c[4 * idx + 2]), "+f"(reg_c[4 * idx + 3])
+                     : "r"(reg_a[0]), "r"(reg_a[1]), "r"(reg_b[0]));
+      }
+
+      float2 val;
+#pragma unroll
+      for (int idx = 0; idx < 4; idx++) {
+        val.x = reg_c[4 * idx + register_choice];
+        val.y = reg_c[4 * idx + register_choice + 2];
+
+        const unsigned full_mask = 0xffffffffu;
+        val.x += __shfl_down_sync(full_mask, val.x, 18);
+        val.y += __shfl_down_sync(full_mask, val.y, 18);
+        val.x += __shfl_down_sync(full_mask, val.x, 9);
+        val.y += __shfl_down_sync(full_mask, val.y, 9);
+        val.x += __shfl_down_sync(full_mask, val.x, 4);
+        val.y += __shfl_down_sync(full_mask, val.y, 4);
+
+        int out_col = col_start + 16 * idx + 2 * warpid;
+        int out_idx = 16 * idx + 2 * warpid;
+        if (laneid == 0 && out_col < feat_dim) {
+          output_buffer[out_idx] += val.x;
+          if (out_col + 1 < feat_dim) {
+            output_buffer[out_idx + 1] += val.y;
+          }
+        }
+      }
+      __syncthreads();
+    }
+
+    float *output_row = &out[target_row * feat_dim + col_start];
+    for (int i = 4 * threadIdx.x; i < kTileN; i += 4 * blockDim.x) {
+      if ((feat_dim % 4 == 0) && col_start + i + 3 < feat_dim) {
+        reinterpret_cast<float4 *>(&output_row[i])[0] =
+            reinterpret_cast<float4 *>(&output_buffer[i])[0];
+      } else {
+#pragma unroll
+        for (int t = 0; t < 4; t++) {
+          if (col_start + i + t < feat_dim) {
+            output_row[i + t] = output_buffer[i + t];
+          }
         }
       }
     }
+    __syncthreads();
   }
 }
 
